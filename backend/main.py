@@ -3,7 +3,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from typing import List, Optional
 import re
+import json
 from datetime import datetime
+from google import genai
 
 from database import SessionLocal, Hotel, Flight, Attraction, init_db
 from models import (
@@ -11,6 +13,9 @@ from models import (
     HotelResponse, FlightResponse, AttractionResponse,
     BookingRequest, BookingResponse
 )
+
+# Initialize Google AI client
+client = genai.Client(api_key="AIzaSyB2IWaDW1A8W-WfNMOdFvNr2JhpbO5Fik4")
 
 app = FastAPI()
 
@@ -164,11 +169,43 @@ def process_travel_plan(request: TravelPlanRequest, db: Session = Depends(get_db
         current_day=1
     )
 
+def get_ai_filtering_guidance(user_message: str, available_items: List, item_type: str) -> str:
+    """Use Google AI to analyze user preferences and get filtering guidance"""
+    try:
+        # Create a description of available items for context
+        items_summary = []
+        for item in available_items[:10]:  # Limit to first 10 for context
+            if item_type == "hotel":
+                items_summary.append(f"- {item.name} in {item.city}: {item.description}, Amenities: {item.amenities}")
+            elif item_type == "attraction":
+                items_summary.append(f"- {item.name} in {item.city}: {item.description}, Category: {item.category}")
+        
+        prompt = f"""You are a travel recommendation assistant. The user has sent this preference: "{user_message}"
+
+Available {item_type}s:
+{chr(10).join(items_summary)}
+
+Based on the user's preference, analyze what they want and respond with a JSON object containing:
+- "keywords": array of important keywords to match (e.g., ["nature", "chill", "family-friendly"])
+- "priority": what matters most (e.g., "nature over history", "budget-friendly", "luxury")
+- "filter_logic": brief description of how to filter items
+
+Respond ONLY with valid JSON, no other text."""
+        
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+        )
+
+        return response.text
+    except Exception as e:
+        print(f"Error calling Google AI: {e}")
+        return '{"keywords": [], "priority": "", "filter_logic": ""}'
+
 @app.post("/api/chat", response_model=RecommendationsResponse)
 def chat_with_agent(message: ChatMessage, db: Session = Depends(get_db)):
-    """Handle chatbot messages and update recommendations"""
-    # Extract preferences from chat message
-    preferences = message.message.lower()
+    """Handle chatbot messages and update recommendations using Google AI"""
+    user_preferences = message.message
     
     # Parse original plan if provided
     if message.current_plan:
@@ -181,29 +218,74 @@ def chat_with_agent(message: ChatMessage, db: Session = Depends(get_db)):
     
     # Get base recommendations
     if not locations:
-        hotels = db.query(Hotel).limit(6).all()
-        flights = db.query(Flight).limit(5).all()
-        attractions = db.query(Attraction).limit(6).all()
+        hotels = db.query(Hotel).limit(20).all()  # Get more to filter from
+        flights = db.query(Flight).limit(10).all()
+        attractions = db.query(Attraction).limit(20).all()
     else:
-        hotels = db.query(Hotel).filter(
-            Hotel.city.in_(locations) | Hotel.country.in_(locations)
-        ).limit(6).all()
+        hotels = db.query(Hotel).limit(20).all()
         
         flights = db.query(Flight).filter(
             Flight.destination.in_(locations) | Flight.origin.in_(locations)
-        ).limit(5).all()
+        ).limit(10).all()
         
         attractions = db.query(Attraction).filter(
             Attraction.city.in_(locations) | Attraction.country.in_(locations)
-        ).limit(6).all()
+        ).limit(20).all()
     
-    # Apply preferences from chat
-    hotels = filter_by_preferences(hotels, preferences)
-    attractions = filter_by_preferences(attractions, preferences)
+    # Use Google AI to get filtering guidance
+    try:
+        # Get AI guidance for hotels
+        hotel_guidance = get_ai_filtering_guidance(user_preferences, hotels, "hotel")
+        hotel_guidance_json = json.loads(hotel_guidance.strip().replace('```json', '').replace('```', ''))
+        hotel_keywords = [k.lower() for k in hotel_guidance_json.get("keywords", [])]
+        
+        # Get AI guidance for attractions
+        attraction_guidance = get_ai_filtering_guidance(user_preferences, attractions, "attraction")
+        attraction_guidance_json = json.loads(attraction_guidance.strip().replace('```json', '').replace('```', ''))
+        attraction_keywords = [k.lower() for k in attraction_guidance_json.get("keywords", [])]
+        
+        # Filter hotels based on AI guidance
+        filtered_hotels = []
+        debug_dict = {}
+        for hotel in hotels:
+            hotel_text = f"{hotel.name} {hotel.description} {hotel.amenities} {hotel.city} {hotel.country}".lower()
+            score = sum(1 for keyword in hotel_keywords if keyword in hotel_text)
+            debug_dict[hotel.name] = score
+            print('!!!!!!!', hotel.name, score);
+            if hotel_keywords:
+                if score > 0 or any(kw in user_preferences.lower() for kw in hotel_keywords):
+                    filtered_hotels.append((hotel, score))
+            else:
+                filtered_hotels.append((hotel, 0))
+        
+        # Sort by relevance score and take top 6
+        filtered_hotels.sort(key=lambda x: x[1], reverse=True)
+        hotels = [h[0] for h in filtered_hotels[:6]]
+        
+        # Filter attractions based on AI guidance
+        filtered_attractions = []
+        for attraction in attractions:
+            attraction_text = f"{attraction.name} {attraction.description} {attraction.category}".lower()
+            score = sum(1 for keyword in attraction_keywords if keyword in attraction_text)
+            if attraction_keywords:
+                if score > 0 or any(kw in user_preferences.lower() for kw in attraction_keywords):
+                    filtered_attractions.append((attraction, score))
+            else:
+                filtered_attractions.append((attraction, 0))
+        
+        # Sort by relevance score and take top 6
+        filtered_attractions.sort(key=lambda x: x[1], reverse=True)
+        attractions = [a[0] for a in filtered_attractions[:6]]
+        
+    except Exception as e:
+        print(f"Error processing AI guidance: {e}")
+        # Fallback to simple filtering
+        hotels = filter_by_preferences(hotels[:6], user_preferences.lower())
+        attractions = filter_by_preferences(attractions[:6], user_preferences.lower())
     
     return RecommendationsResponse(
         hotels=[HotelResponse(**{k: getattr(h, k) for k in HotelResponse.__fields__.keys()}) for h in hotels],
-        flights=[FlightResponse(**{k: getattr(f, k) for k in FlightResponse.__fields__.keys()}) for f in flights],
+        flights=[FlightResponse(**{k: getattr(f, k) for k in FlightResponse.__fields__.keys()}) for f in flights[:5]],
         attractions=[AttractionResponse(**{k: getattr(a, k) for k in AttractionResponse.__fields__.keys()}) for a in attractions],
         days=days,
         current_day=1
