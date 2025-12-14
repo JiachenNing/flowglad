@@ -49,18 +49,35 @@ def read_root():
 def extract_locations(text: str) -> List[str]:
     """Extract location names from travel plan text"""
     locations = []
-    # Common cities and countries
+    # Common cities and countries - ordered by specificity (cities before countries)
     common_locations = [
-        "Tokyo", "Kyoto", "Hakone", "Japan",
-        "Paris", "France", "Rome", "Italy", "Barcelona", "Spain",
-        "London", "UK", "Berlin", "Germany", "Amsterdam", "Netherlands",
-        "Europe", "Asia", "America", "USA"
+        # Cities (more specific)
+        "Tokyo", "Kyoto", "Hakone", "Paris", "Rome", "Barcelona", "London", 
+        "Berlin", "Amsterdam", "Vienna", "Prague", "Dubai", "Singapore", 
+        "Bangkok", "Sydney", "New York", "Los Angeles", "Istanbul", "Cairo", 
+        "Rio de Janeiro", "Buenos Aires",
+        # Countries (less specific)
+        "Japan", "France", "Italy", "Spain", "UK", "Germany", "Netherlands",
+        "Austria", "Czech Republic", "UAE", "Thailand", "Australia", "USA",
+        "Turkey", "Egypt", "Brazil", "Argentina",
+        # Regions
+        "Europe", "Asia", "America"
     ]
     
     text_lower = text.lower()
+    found_locations = []
+    
+    # Check for locations in order (cities first, then countries)
     for loc in common_locations:
         if loc.lower() in text_lower:
+            found_locations.append(loc)
+    
+    # Remove duplicates while preserving order
+    seen = set()
+    for loc in found_locations:
+        if loc not in seen:
             locations.append(loc)
+            seen.add(loc)
     
     return locations
 
@@ -221,16 +238,26 @@ def chat_with_agent(message: ChatMessage, db: Session = Depends(get_db)):
     # Parse original plan if provided
     if message.current_plan:
         parsed = parse_travel_plan(message.current_plan)
-        locations = parsed["locations"]
+        original_locations = parsed["locations"]
         days = parsed["days"]
     else:
-        locations = []
+        original_locations = []
         days = 1
     
-    # Extract locations from user message as well (users may mention multiple locations)
+    # Extract locations from user message - these override the original plan locations
     message_locations = extract_locations(user_preferences)
-    # Combine locations from plan and message, remove duplicates
-    all_locations = list(set(locations + message_locations))[-1:]
+    
+    # Check if user mentioned a different number of days in the chat message
+    chat_days = extract_days(user_preferences)
+    if chat_days > 1:
+        days = chat_days
+    
+    # If user mentioned locations in chatbot, use those (override original plan)
+    # Otherwise, use original plan locations
+    if message_locations:
+        all_locations = message_locations
+    else:
+        all_locations = original_locations
     
     # Get base recommendations filtered by locations
     if all_locations:
