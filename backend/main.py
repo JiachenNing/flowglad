@@ -145,17 +145,9 @@ def process_travel_plan(request: TravelPlanRequest, db: Session = Depends(get_db
         attractions = db.query(Attraction).filter(Attraction.country.in_(["France", "Italy", "Spain"])).limit(6).all()
     else:
         # Filter by specific locations
-        hotels = db.query(Hotel).filter(
-            Hotel.city.in_(locations) | Hotel.country.in_(locations)
-        ).limit(6).all()
-        
-        flights = db.query(Flight).filter(
-            Flight.destination.in_(locations) | Flight.origin.in_(locations)
-        ).limit(5).all()
-        
-        attractions = db.query(Attraction).filter(
-            Attraction.city.in_(locations) | Attraction.country.in_(locations)
-        ).limit(6).all()
+        hotels = db.query(Hotel).limit(10).all()
+        flights = db.query(Flight).limit(10).all()
+        attractions = db.query(Attraction).limit(10).all()
     
     # Apply preferences if provided
     if request.preferences:
