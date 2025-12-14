@@ -5,7 +5,8 @@ from typing import List, Optional
 import re
 import json
 from datetime import datetime
-from google import genai
+from sentence_transformers import SentenceTransformer
+import numpy as np
 
 from database import SessionLocal, Hotel, Flight, Attraction, init_db
 from models import (
@@ -14,8 +15,8 @@ from models import (
     BookingRequest, BookingResponse
 )
 
-# Initialize Google AI client
-client = genai.Client(api_key="AIzaSyB2IWaDW1A8W-WfNMOdFvNr2JhpbO5Fik4")
+# Initialize sentence transformer model
+model = SentenceTransformer('all-MiniLM-L6-v2')
 
 app = FastAPI()
 
@@ -169,42 +170,43 @@ def process_travel_plan(request: TravelPlanRequest, db: Session = Depends(get_db
         current_day=1
     )
 
-def get_ai_filtering_guidance(user_message: str, available_items: List, item_type: str) -> str:
-    """Use Google AI to analyze user preferences and get filtering guidance"""
+def calculate_similarity_scores(user_message: str, items: List, item_type: str) -> List[tuple]:
+    """Calculate cosine similarity between user message and items using sentence transformers"""
     try:
-        # Create a description of available items for context
-        items_summary = []
-        for item in available_items[:10]:  # Limit to first 10 for context
+        # Get user message embedding
+        user_embedding = model.encode([user_message])
+        
+        # Create item descriptions
+        item_texts = []
+        for item in items:
             if item_type == "hotel":
-                items_summary.append(f"- {item.name} in {item.city}: {item.description}, Amenities: {item.amenities}")
+                item_text = f"{item.name} {item.description} {item.amenities} {item.city} {item.country}"
             elif item_type == "attraction":
-                items_summary.append(f"- {item.name} in {item.city}: {item.description}, Category: {item.category}")
+                item_text = f"{item.name} {item.description} {item.category} {item.city} {item.country}"
+            else:  # flight
+                item_text = f"{item.airline} {item.origin} {item.destination} {item.flight_class}"
+            item_texts.append(item_text)
         
-        prompt = f"""You are a travel recommendation assistant. The user has sent this preference: "{user_message}"
-
-Available {item_type}s:
-{chr(10).join(items_summary)}
-
-Based on the user's preference, analyze what they want and respond with a JSON object containing:
-- "keywords": array of important keywords to match (e.g., ["nature", "chill", "family-friendly"])
-- "priority": what matters most (e.g., "nature over history", "budget-friendly", "luxury")
-- "filter_logic": brief description of how to filter items
-
-Respond ONLY with valid JSON, no other text."""
+        # Get item embeddings
+        item_embeddings = model.encode(item_texts)
         
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=prompt,
-        )
-
-        return response.text
+        # Calculate cosine similarity using numpy
+        # Normalize embeddings
+        user_norm = user_embedding / np.linalg.norm(user_embedding, axis=1, keepdims=True)
+        items_norm = item_embeddings / np.linalg.norm(item_embeddings, axis=1, keepdims=True)
+        # Calculate cosine similarity
+        similarities = np.dot(user_norm, items_norm.T)[0]
+        
+        # Return items with similarity scores
+        return list(zip(items, similarities))
     except Exception as e:
-        print(f"Error calling Google AI: {e}")
-        return '{"keywords": [], "priority": "", "filter_logic": ""}'
+        print(f"Error calculating similarity: {e}")
+        # Fallback: return items with zero scores
+        return [(item, 0.0) for item in items]
 
 @app.post("/api/chat", response_model=RecommendationsResponse)
 def chat_with_agent(message: ChatMessage, db: Session = Depends(get_db)):
-    """Handle chatbot messages and update recommendations using Google AI"""
+    """Handle chatbot messages and update recommendations using sentence transformers and cosine similarity"""
     user_preferences = message.message
     
     # Parse original plan if provided
@@ -217,68 +219,26 @@ def chat_with_agent(message: ChatMessage, db: Session = Depends(get_db)):
         days = 1
     
     # Get base recommendations
-    if not locations:
-        hotels = db.query(Hotel).limit(20).all()  # Get more to filter from
-        flights = db.query(Flight).limit(10).all()
-        attractions = db.query(Attraction).limit(20).all()
-    else:
-        hotels = db.query(Hotel).limit(20).all()
-        
-        flights = db.query(Flight).filter(
-            Flight.destination.in_(locations) | Flight.origin.in_(locations)
-        ).limit(10).all()
-        
-        attractions = db.query(Attraction).filter(
-            Attraction.city.in_(locations) | Attraction.country.in_(locations)
-        ).limit(20).all()
-    
-    # Use Google AI to get filtering guidance
+    hotels = db.query(Hotel).limit(20).all()
+    flights = db.query(Flight).limit(10).all()
+    attractions = db.query(Attraction).limit(20).all()
+
+    # Calculate similarity scores using sentence transformers
     try:
-        # Get AI guidance for hotels
-        hotel_guidance = get_ai_filtering_guidance(user_preferences, hotels, "hotel")
-        hotel_guidance_json = json.loads(hotel_guidance.strip().replace('```json', '').replace('```', ''))
-        hotel_keywords = [k.lower() for k in hotel_guidance_json.get("keywords", [])]
+        # Get hotels with similarity scores
+        hotel_scores = calculate_similarity_scores(user_preferences, hotels, "hotel")
+        # Sort by similarity score (descending) and take top 6
+        hotel_scores.sort(key=lambda x: x[1], reverse=True)
+        hotels = [h[0] for h in hotel_scores[:6]]
         
-        # Get AI guidance for attractions
-        attraction_guidance = get_ai_filtering_guidance(user_preferences, attractions, "attraction")
-        attraction_guidance_json = json.loads(attraction_guidance.strip().replace('```json', '').replace('```', ''))
-        attraction_keywords = [k.lower() for k in attraction_guidance_json.get("keywords", [])]
-        
-        # Filter hotels based on AI guidance
-        filtered_hotels = []
-        debug_dict = {}
-        for hotel in hotels:
-            hotel_text = f"{hotel.name} {hotel.description} {hotel.amenities} {hotel.city} {hotel.country}".lower()
-            score = sum(1 for keyword in hotel_keywords if keyword in hotel_text)
-            debug_dict[hotel.name] = score
-            print('!!!!!!!', hotel.name, score);
-            if hotel_keywords:
-                if score > 0 or any(kw in user_preferences.lower() for kw in hotel_keywords):
-                    filtered_hotels.append((hotel, score))
-            else:
-                filtered_hotels.append((hotel, 0))
-        
-        # Sort by relevance score and take top 6
-        filtered_hotels.sort(key=lambda x: x[1], reverse=True)
-        hotels = [h[0] for h in filtered_hotels[:6]]
-        
-        # Filter attractions based on AI guidance
-        filtered_attractions = []
-        for attraction in attractions:
-            attraction_text = f"{attraction.name} {attraction.description} {attraction.category}".lower()
-            score = sum(1 for keyword in attraction_keywords if keyword in attraction_text)
-            if attraction_keywords:
-                if score > 0 or any(kw in user_preferences.lower() for kw in attraction_keywords):
-                    filtered_attractions.append((attraction, score))
-            else:
-                filtered_attractions.append((attraction, 0))
-        
-        # Sort by relevance score and take top 6
-        filtered_attractions.sort(key=lambda x: x[1], reverse=True)
-        attractions = [a[0] for a in filtered_attractions[:6]]
+        # Get attractions with similarity scores
+        attraction_scores = calculate_similarity_scores(user_preferences, attractions, "attraction")
+        # Sort by similarity score (descending) and take top 6
+        attraction_scores.sort(key=lambda x: x[1], reverse=True)
+        attractions = [a[0] for a in attraction_scores[:6]]
         
     except Exception as e:
-        print(f"Error processing AI guidance: {e}")
+        print(f"Error calculating similarity scores: {e}")
         # Fallback to simple filtering
         hotels = filter_by_preferences(hotels[:6], user_preferences.lower())
         attractions = filter_by_preferences(attractions[:6], user_preferences.lower())
