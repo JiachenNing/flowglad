@@ -14,7 +14,6 @@ from models import (
     HotelResponse, FlightResponse, AttractionResponse,
     BookingRequest, BookingResponse
 )
-
 # Initialize sentence transformer model
 model = SentenceTransformer('all-MiniLM-L6-v2')
 
@@ -184,9 +183,9 @@ def process_travel_plan(request: TravelPlanRequest, db: Session = Depends(get_db
         attractions = db.query(Attraction).all()
     
     # Apply preferences if provided
-    if request.preferences:
-        hotels = filter_by_preferences(hotels, request.preferences)
-        attractions = filter_by_preferences(attractions, request.preferences)
+    # if request.preferences:
+    #     hotels = filter_by_preferences(hotels, request.preferences)
+    #     attractions = filter_by_preferences(attractions, request.preferences)
     
     return RecommendationsResponse(
         hotels=[HotelResponse(**{k: getattr(h, k) for k in HotelResponse.__fields__.keys()}) for h in hotels],
@@ -279,30 +278,29 @@ def chat_with_agent(message: ChatMessage, db: Session = Depends(get_db)):
         attractions = db.query(Attraction).all()
 
     # Calculate similarity scores using sentence transformers
-    try:
-        # Get hotels with similarity scores
-        hotel_scores = calculate_similarity_scores(user_preferences, hotels, "hotel")
-        # Sort by similarity score (descending) and take top 6
-        hotel_scores.sort(key=lambda x: x[1], reverse=True)
-        hotels = [h[0] for h in hotel_scores]
+    # Get hotels with similarity scores
+    hotel_scores = calculate_similarity_scores(user_preferences, hotels, "hotel")
+    # Sort by similarity score (descending) and take top 6
+    hotel_scores.sort(key=lambda x: x[1], reverse=True)
+    hotels = [h[0] for h in hotel_scores]
 
-        # Get flights with similarity scores
-        flight_scores = calculate_similarity_scores(user_preferences, flights, "flight")
-        # Sort by similarity score (descending) and take top 5
-        flight_scores.sort(key=lambda x: x[1], reverse=True)
-        flights = [f[0] for f in flight_scores]
+    # Get flights with similarity scores
+    flight_scores = calculate_similarity_scores(user_preferences, flights, "flight")
+    # Sort by similarity score (descending) and take top 5
+    flight_scores.sort(key=lambda x: x[1], reverse=True)
+    flights = [f[0] for f in flight_scores]
+    
+    # Get attractions with similarity scores
+    attraction_scores = calculate_similarity_scores(user_preferences, attractions, "attraction")
+    # Sort by similarity score (descending) and take top 6
+    attraction_scores.sort(key=lambda x: x[1], reverse=True)
+    attractions = [a[0] for a in attraction_scores]
         
-        # Get attractions with similarity scores
-        attraction_scores = calculate_similarity_scores(user_preferences, attractions, "attraction")
-        # Sort by similarity score (descending) and take top 6
-        attraction_scores.sort(key=lambda x: x[1], reverse=True)
-        attractions = [a[0] for a in attraction_scores]
-        
-    except Exception as e:
-        print(f"Error calculating similarity scores: {e}")
-        # Fallback to simple filtering
-        hotels = filter_by_preferences(hotels, user_preferences.lower())
-        attractions = filter_by_preferences(attractions, user_preferences.lower())
+    # except Exception as e:
+    #     print(f"Error calculating similarity scores: {e}")
+    #     # Fallback to simple filtering
+    #     hotels = filter_by_preferences(hotels, user_preferences.lower())
+    #     attractions = filter_by_preferences(attractions, user_preferences.lower())
     
     return RecommendationsResponse(
         hotels=[HotelResponse(**{k: getattr(h, k) for k in HotelResponse.__fields__.keys()}) for h in hotels],
