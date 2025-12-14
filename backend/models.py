@@ -20,12 +20,17 @@ class HotelResponse(BaseModel):
     amenities: str
     image_url: str
     address: str
+    booking_link: Optional[str] = None
+    images: Optional[str] = None
 
 class FlightResponse(BaseModel):
     id: int
     airline: str
+    flight_number: Optional[str] = None
     origin: str
     destination: str
+    departure_airport: Optional[str] = None
+    arrival_airport: Optional[str] = None
     departure_date: str
     departure_time: str
     arrival_time: str
@@ -33,6 +38,7 @@ class FlightResponse(BaseModel):
     duration: str
     stops: int
     flight_class: str
+    booking_link: Optional[str] = None
 
 class AttractionResponse(BaseModel):
     id: int
@@ -46,6 +52,8 @@ class AttractionResponse(BaseModel):
     image_url: str
     address: str
     opening_hours: str
+    ticket_link: Optional[str] = None
+    images: Optional[str] = None
 
 class RecommendationsResponse(BaseModel):
     hotels: List[HotelResponse]
