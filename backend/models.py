@@ -72,3 +72,13 @@ class BookingResponse(BaseModel):
     message: str
     booking_id: Optional[str] = None
 
+class CheckoutSessionRequest(BaseModel):
+    hotel_id: int
+    customer_external_id: Optional[str] = None
+    price_slug: Optional[str] = None
+    price_id: Optional[str] = None
+
+class CheckoutSessionResponse(BaseModel):
+    checkout_url: str
+    session_id: Optional[str] = None
+

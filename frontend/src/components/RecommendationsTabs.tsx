@@ -26,14 +26,23 @@ export default function RecommendationsTabs({
 
   const handleBook = async (type: 'hotel' | 'flight' | 'attraction', id: number) => {
     try {
-      const result = await api.bookItem(type, id);
-      setBookingSuccess(result.message);
-      setTimeout(() => {
-        setBookingSuccess(null);
-        setSelectedItem(null);
-      }, 3000);
+      // For hotels, use Flowglad checkout
+      if (type === 'hotel') {
+        const checkout = await api.createFlowgladCheckout(id);
+        // Redirect to Flowglad checkout page
+        window.location.href = checkout.checkout_url;
+      } else {
+        // For flights and attractions, use regular booking
+        const result = await api.bookItem(type, id);
+        setBookingSuccess(result.message);
+        setTimeout(() => {
+          setBookingSuccess(null);
+          setSelectedItem(null);
+        }, 3000);
+      }
     } catch (error) {
-      alert('Booking failed. Please try again.');
+      console.error('Booking error:', error);
+      alert(error instanceof Error ? error.message : 'Booking failed. Please try again.');
     }
   };
 

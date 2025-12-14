@@ -1,18 +1,20 @@
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from typing import List, Optional
 import re
 import json
+import os
 from datetime import datetime
 from sentence_transformers import SentenceTransformer
 import numpy as np
+import requests
 
 from database import SessionLocal, Hotel, Flight, Attraction, init_db
 from models import (
     TravelPlanRequest, ChatMessage, RecommendationsResponse,
     HotelResponse, FlightResponse, AttractionResponse,
-    BookingRequest, BookingResponse
+    BookingRequest, BookingResponse, CheckoutSessionRequest, CheckoutSessionResponse
 )
 
 # Initialize sentence transformer model
@@ -367,4 +369,116 @@ def book_item(request: BookingRequest, db: Session = Depends(get_db)):
     
     else:
         raise HTTPException(status_code=400, detail="Invalid booking type")
+
+def get_customer_external_id(request: Request) -> str:
+    """
+    Extract customer/user ID from the request.
+    For now, uses a simple approach. In production, extract from your auth system.
+    """
+    # Try to get from header
+    user_id = request.headers.get("X-User-Id")
+    if user_id:
+        return user_id
+    
+    # Try to get from query params
+    user_id = request.query_params.get("userId")
+    if user_id:
+        return user_id
+    
+    # Default fallback - in production, this should come from your auth system
+    return "default_user"
+
+@app.post("/api/flowglad/checkout-session", response_model=CheckoutSessionResponse)
+async def create_checkout_session(request: CheckoutSessionRequest, http_request: Request):
+    """Create a Flowglad checkout session for hotel booking"""
+    try:
+        # Get Flowglad API key from environment
+        flowglad_api_key = os.getenv("FLOWGLAD_API_KEY", "sk_test_8wB6uVgbjqRPNqdi8f9eoB")
+        
+        # Get customer external ID
+        customer_external_id = request.customer_external_id or get_customer_external_id(http_request)
+        
+        # Get frontend URL for redirects
+        frontend_url = os.getenv("FRONTEND_URL", "http://localhost:5173")
+        success_url = f"{frontend_url}/booking-success"
+        cancel_url = f"{frontend_url}/booking-cancel"
+        
+        # Prepare payload according to Flowglad API
+        payload = {
+            "checkoutSession": {
+                "customerExternalId": 'dz27sisCQPEgo20qhWpqy',
+                "successUrl": success_url,
+                "cancelUrl": cancel_url,
+                "type": "product",
+                "priceSlug": "booking_dollar",
+                "outputMetadata": {
+                    "hotel_id": request.hotel_id,
+                    "booking_type": "hotel"
+                },
+                "outputName": f"Hotel Booking #{request.hotel_id}",
+                "quantity": 123,
+                "anonymous": False
+            }
+        }
+        
+
+        # Add priceSlug or priceId if provided
+        if request.price_slug:
+            payload["checkoutSession"]["priceSlug"] = request.price_slug
+        elif request.price_id:
+            payload["checkoutSession"]["priceId"] = request.price_id
+        else:
+            # Default price slug - update this to match your Flowglad pricing
+            payload["checkoutSession"]["priceSlug"] = "hotel_booking"
+        
+
+        # Call Flowglad API
+        url = "https://app.flowglad.com/api/v1/checkout-sessions"
+        headers = {
+            "Authorization": flowglad_api_key,
+            "Content-Type": "application/json"
+        }
+        
+        response = requests.post(url, json=payload, headers=headers)
+        response.raise_for_status()
+        
+        result = response.json()
+        
+        # Extract checkout URL from response
+        # Flowglad API typically returns the checkout session with a url field
+        # Check various possible response structures
+        checkout_session = result.get("checkoutSession") or result
+        checkout_url = (
+            checkout_session.get("url") or 
+            checkout_session.get("checkoutUrl") or 
+            checkout_session.get("checkout_url") or
+            result.get("url") or 
+            result.get("checkoutUrl") or 
+            result.get("checkout_url")
+        )
+        session_id = (
+            checkout_session.get("id") or 
+            checkout_session.get("sessionId") or 
+            checkout_session.get("session_id") or
+            result.get("id") or 
+            result.get("sessionId") or 
+            result.get("session_id")
+        )
+        
+        if not checkout_url:
+            raise HTTPException(
+                status_code=500, 
+                detail=f"Failed to get checkout URL from Flowglad. Response: {result}"
+            )
+        
+        return CheckoutSessionResponse(
+            checkout_url=checkout_url,
+            session_id=session_id
+        )
+        
+    except requests.exceptions.HTTPError as e:
+        error_detail = f"Flowglad API error: {e.response.text if hasattr(e, 'response') else str(e)}"
+        raise HTTPException(status_code=e.response.status_code if hasattr(e, 'response') else 500, detail=error_detail)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error creating checkout session: {str(e)}")
 

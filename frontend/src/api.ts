@@ -56,5 +56,24 @@ export const api = {
     }
     return response.json();
   },
+
+  async createFlowgladCheckout(hotelId: number, priceSlug?: string, priceId?: string): Promise<{ checkout_url: string; session_id?: string }> {
+    const response = await fetch(`${API_BASE_URL}/api/flowglad/checkout-session`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ 
+        hotel_id: hotelId,
+        price_slug: priceSlug,
+        price_id: priceId
+      }),
+    });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: 'Failed to create checkout session' }));
+      throw new Error(error.detail || 'Failed to create checkout session');
+    }
+    return response.json();
+  },
 };
 
