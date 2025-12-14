@@ -66,9 +66,10 @@ def extract_locations(text: str) -> List[str]:
 
 def extract_days(text: str) -> int:
     """Extract number of days from travel plan"""
-    # Look for patterns like "7-day", "7 days", "seven days"
+    # Look for patterns like "7-day", "7 days", "7day", "seven days"
     patterns = [
         r'(\d+)[-\s]day',
+        r'(\d+)day',
         r'(\d+)\s+days?',
     ]
     
@@ -137,17 +138,33 @@ def process_travel_plan(request: TravelPlanRequest, db: Session = Depends(get_db
     parsed = parse_travel_plan(request.plan)
     locations = parsed["locations"]
     days = parsed["days"]
+
+    # Extract locations from preferences as well (users may mention multiple locations)
+    preference_locations = []
+    if request.preferences:
+        preference_locations = extract_locations(request.preferences)
     
-    # If no specific locations, return popular choices
-    if not locations or "europe" in request.plan.lower():
-        hotels = db.query(Hotel).filter(Hotel.country.in_(["France", "Italy", "Spain"])).limit(6).all()
-        flights = db.query(Flight).filter(Flight.destination.in_(["Paris", "Rome", "Barcelona"])).limit(5).all()
-        attractions = db.query(Attraction).filter(Attraction.country.in_(["France", "Italy", "Spain"])).limit(6).all()
+    # Combine all locations from plan and preferences, remove duplicates
+    all_locations = list(set(locations + preference_locations))
+    
+    # Filter by all locations
+    if all_locations:
+        hotels = db.query(Hotel).filter(
+            Hotel.city.in_(all_locations[-1:]) | Hotel.country.in_(all_locations)
+        ).all()
+        
+        flights = db.query(Flight).filter(
+            Flight.destination.in_(all_locations[-1:]) | Flight.origin.in_(all_locations)
+        ).all()
+        
+        attractions = db.query(Attraction).filter(
+            Attraction.city.in_(all_locations[-1:]) | Attraction.country.in_(all_locations)
+        ).all()
     else:
-        # Filter by specific locations
-        hotels = db.query(Hotel).limit(10).all()
-        flights = db.query(Flight).limit(10).all()
-        attractions = db.query(Attraction).limit(10).all()
+        # If no locations specified, get all items
+        hotels = db.query(Hotel).all()
+        flights = db.query(Flight).all()
+        attractions = db.query(Attraction).all()
     
     # Apply preferences if provided
     if request.preferences:
@@ -210,10 +227,29 @@ def chat_with_agent(message: ChatMessage, db: Session = Depends(get_db)):
         locations = []
         days = 1
     
-    # Get base recommendations
-    hotels = db.query(Hotel).limit(20).all()
-    flights = db.query(Flight).limit(10).all()
-    attractions = db.query(Attraction).limit(20).all()
+    # Extract locations from user message as well (users may mention multiple locations)
+    message_locations = extract_locations(user_preferences)
+    # Combine locations from plan and message, remove duplicates
+    all_locations = list(set(locations + message_locations))[-1:]
+    
+    # Get base recommendations filtered by locations
+    if all_locations:
+        hotels = db.query(Hotel).filter(
+            Hotel.city.in_(all_locations) | Hotel.country.in_(all_locations)
+        ).all()
+        
+        flights = db.query(Flight).filter(
+            Flight.destination.in_(all_locations) | Flight.origin.in_(all_locations)
+        ).all()
+        
+        attractions = db.query(Attraction).filter(
+            Attraction.city.in_(all_locations) | Attraction.country.in_(all_locations)
+        ).all()
+    else:
+        # If no locations specified, get all items
+        hotels = db.query(Hotel).all()
+        flights = db.query(Flight).all()
+        attractions = db.query(Attraction).all()
 
     # Calculate similarity scores using sentence transformers
     try:
@@ -221,23 +257,29 @@ def chat_with_agent(message: ChatMessage, db: Session = Depends(get_db)):
         hotel_scores = calculate_similarity_scores(user_preferences, hotels, "hotel")
         # Sort by similarity score (descending) and take top 6
         hotel_scores.sort(key=lambda x: x[1], reverse=True)
-        hotels = [h[0] for h in hotel_scores[:6]]
+        hotels = [h[0] for h in hotel_scores]
+
+        # Get flights with similarity scores
+        flight_scores = calculate_similarity_scores(user_preferences, flights, "flight")
+        # Sort by similarity score (descending) and take top 5
+        flight_scores.sort(key=lambda x: x[1], reverse=True)
+        flights = [f[0] for f in flight_scores]
         
         # Get attractions with similarity scores
         attraction_scores = calculate_similarity_scores(user_preferences, attractions, "attraction")
         # Sort by similarity score (descending) and take top 6
         attraction_scores.sort(key=lambda x: x[1], reverse=True)
-        attractions = [a[0] for a in attraction_scores[:6]]
+        attractions = [a[0] for a in attraction_scores]
         
     except Exception as e:
         print(f"Error calculating similarity scores: {e}")
         # Fallback to simple filtering
-        hotels = filter_by_preferences(hotels[:6], user_preferences.lower())
-        attractions = filter_by_preferences(attractions[:6], user_preferences.lower())
+        hotels = filter_by_preferences(hotels, user_preferences.lower())
+        attractions = filter_by_preferences(attractions, user_preferences.lower())
     
     return RecommendationsResponse(
         hotels=[HotelResponse(**{k: getattr(h, k) for k in HotelResponse.__fields__.keys()}) for h in hotels],
-        flights=[FlightResponse(**{k: getattr(f, k) for k in FlightResponse.__fields__.keys()}) for f in flights[:5]],
+        flights=[FlightResponse(**{k: getattr(f, k) for k in FlightResponse.__fields__.keys()}) for f in flights],
         attractions=[AttractionResponse(**{k: getattr(a, k) for k in AttractionResponse.__fields__.keys()}) for a in attractions],
         days=days,
         current_day=1
